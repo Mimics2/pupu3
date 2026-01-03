@@ -11,7 +11,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Конфигурация
-BOT_TOKEN = "8569312600:AAGiuvWLi2n84SYahF_pyye94xFqKgNl2IU"  # Ваш новый токен
+BOT_TOKEN = "8569312600:AAGiuvWLi2n84SYahF_pyye94xFqKgNl2IU"
 ADMIN_ID = 6646433980
 
 # Хранилище для состояния
@@ -22,41 +22,42 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     logger.info(f"User {user.id} started the bot")
     
-    # Простое меню
+    # Простое меню БЕЗ Markdown
     menu_text = f"""
-🎉 *Бот запущен!*
+🎉 БОТ ЗАПУЩЕН!
 
 👋 Привет, {user.first_name}!
-🆔 Ваш ID: `{user.id}`
+🆔 Ваш ID: {user.id}
 
-📋 *Доступные команды:*
+📋 Доступные команды:
 /start - Начать работу
 /help - Помощь
 /schedule - Запланировать пост
 /channels - Мои каналы
 /tariffs - Тарифы
+/status - Статус бота
 
-⚡ *Бот готов к работе!*
+⚡ Бот готов к работе!
 """
     
-    await update.message.reply_text(menu_text, parse_mode="Markdown")
+    await update.message.reply_text(menu_text)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка команды /help"""
     help_text = """
-🤖 *Помощь по боту*
+🤖 ПОМОЩЬ ПО БОТУ
 
-*Основные функции:*
-1. 📅 *Планирование постов* - Отправьте /schedule
-2. 📢 *Управление каналами* - Отправьте /channels  
-3. 💎 *Тарифная система* - Отправьте /tariffs
+ОСНОВНЫЕ ФУНКЦИИ:
+1. 📅 Планирование постов - Отправьте /schedule
+2. 📢 Управление каналами - Отправьте /channels  
+3. 💎 Тарифная система - Отправьте /tariffs
 
-*Формат времени:* ГГГГ.ММ.ДД ЧЧ:ММ
-*Пример:* 2025.12.31 15:30
+Формат времени: ГГГГ.ММ.ДД ЧЧ:ММ
+Пример: 2025.12.31 15:30
 
 Для начала работы отправьте /start
 """
-    await update.message.reply_text(help_text, parse_mode="Markdown")
+    await update.message.reply_text(help_text)
 
 async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Начать планирование"""
@@ -64,51 +65,59 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_states[user_id] = "waiting_for_time"
     
     await update.message.reply_text(
-        "📅 *Планирование поста*\n\n"
+        "📅 ПЛАНИРОВАНИЕ ПОСТА\n\n"
         "Отправьте время публикации в формате:\n"
-        "`ГГГГ.ММ.ДД ЧЧ:ММ`\n\n"
-        "*Пример:* 2025.12.31 15:30\n"
+        "ГГГГ.ММ.ДД ЧЧ:ММ\n\n"
+        "Пример: 2025.12.31 15:30\n"
         "Или выберите:\n"
-        "• `now` - сейчас\n"
-        "• `1h` - через час\n"
-        "• `3h` - через 3 часа",
-        parse_mode="Markdown"
+        "• now - сейчас\n"
+        "• 1h - через час\n"
+        "• 3h - через 3 часа"
     )
 
 async def channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Мои каналы"""
     await update.message.reply_text(
-        "📢 *Управление каналами*\n\n"
+        "📢 УПРАВЛЕНИЕ КАНАЛАМИ\n\n"
         "Чтобы добавить канал:\n"
         "1. Перешлите любое сообщение из канала\n"
         "2. Или отправьте ссылку на канал\n\n"
-        "Мои каналы будут отображаться здесь.",
-        parse_mode="Markdown"
+        "Мои каналы будут отображаться здесь."
     )
 
 async def tariffs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Тарифы"""
     tariffs_text = """
-💎 *Доступные тарифы:*
+💎 ДОСТУПНЫЕ ТАРИФЫ:
 
-*1. Базовый* - 299 звёзд
+1. БАЗОВЫЙ - 299 звёзд
 • 2 канала
 • 5 постов в день
 • 30 дней
 
-*2. Премиум* - 599 звёзд  
+2. ПРЕМИУМ - 599 звёзд  
 • 5 каналов
 • 20 постов в день
 • 30 дней
 
-*3. VIP* - 999 звёзд
+3. VIP - 999 звёзд
 • 10 каналов
 • 50 постов в день
 • 30 дней
 
 Для покупки тарифа свяжитесь с администратором.
 """
-    await update.message.reply_text(tariffs_text, parse_mode="Markdown")
+    await update.message.reply_text(tariffs_text)
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Статус бота"""
+    await update.message.reply_text(
+        "✅ БОТ РАБОТАЕТ НОРМАЛЬНО\n\n"
+        "Платформа: Railway\n"
+        "Режим: Polling\n"
+        "Статус: Активен\n\n"
+        "Все функции доступны!"
+    )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка текстовых сообщений"""
@@ -156,21 +165,44 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Для планирования поста с фото используйте /schedule"
         )
 
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Админ панель"""
+    user_id = update.effective_user.id
+    
+    if user_id == ADMIN_ID:
+        await update.message.reply_text(
+            "👑 АДМИН ПАНЕЛЬ\n\n"
+            "Статистика:\n"
+            "• Пользователей: 1\n"
+            "• Прибыль: 0 звёзд\n"
+            "• Каналов: 0\n\n"
+            "Команды админа будут здесь."
+        )
+    else:
+        await update.message.reply_text("❌ Доступ запрещен")
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка ошибок"""
     logger.error(f"Update {update} caused error {context.error}")
     
     if "Conflict" in str(context.error):
         logger.error("КОНФЛИКТ! Запущено несколько экземпляров бота!")
-        logger.error("Остановите все другие инстансы бота с этим токеном!")
         
         try:
             await update.message.reply_text(
-                "⚠️ *Обнаружен конфликт!*\n\n"
+                "⚠️ ОБНАРУЖЕН КОНФЛИКТ!\n\n"
                 "Запущено несколько экземпляров бота.\n"
-                "Пожалуйста, подождите 30 секунд и попробуйте снова.\n"
-                "Администратор уже устраняет проблему.",
-                parse_mode="Markdown"
+                "Пожалуйста, подождите 30 секунд и попробуйте снова."
+            )
+        except:
+            pass
+    elif "Can't parse entities" in str(context.error):
+        logger.error("Ошибка парсинга Markdown. Исправляю...")
+        
+        try:
+            # Отправляем сообщение без форматирования
+            await update.message.reply_text(
+                "Бот работает! Используйте /help для списка команд."
             )
         except:
             pass
@@ -194,6 +226,8 @@ def main():
         application.add_handler(CommandHandler("schedule", schedule))
         application.add_handler(CommandHandler("channels", channels))
         application.add_handler(CommandHandler("tariffs", tariffs))
+        application.add_handler(CommandHandler("status", status))
+        application.add_handler(CommandHandler("admin", admin_panel))
         
         # Добавляем обработчики сообщений
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -209,8 +243,8 @@ def main():
         application.run_polling(
             drop_pending_updates=True,
             allowed_updates=Update.ALL_TYPES,
-            poll_interval=0.5,
-            timeout=10
+            poll_interval=1.0,
+            timeout=20
         )
         
     except Exception as e:
