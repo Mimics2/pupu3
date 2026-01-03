@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import json
 from enum import Enum
+import aiosqlite
+from aiohttp import web
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -16,27 +18,18 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.date import DateTrigger
-import aiosqlite
 
 # ========== КОНФИГУРАЦИЯ ==========
-BOT_TOKEN = "7370973281:AAGdnM2SdekWwSF5alb5vnt0UWAN5QZ1dCQ"
-ADMIN_ID = 6646433980
-DATABASE_PATH = "scheduler_bot.db"
-
-# Состояния для ConversationHandler
-class States(Enum):
-    AWAITING_CONTENT = 1
-    AWAITING_SCHEDULE_TIME = 2
-    AWAITING_CUSTOM_TIME = 3
-    ADMIN_SET_PRICE = 4
-    ADMIN_ADD_CHANNEL = 5
+BOT_TOKEN = os.getenv('BOT_TOKEN', '7370973281:AAGdnM2SdekWwSF5alb5vnt0UWAN5QZ1dCQ')
+ADMIN_ID = int(os.getenv('ADMIN_ID', '6646433980'))
+PORT = int(os.getenv('PORT', '8000'))
+DATABASE_PATH = os.getenv('DATABASE_PATH', 'scheduler_bot.db')
 
 # Тарифы (по умолчанию)
 TARIFFS = {
     "basic": {
         "name": "Базовый",
-        "price": 299,  # в звездах
+        "price": 299,
         "channels_limit": 2,
         "posts_per_day": 5,
         "duration_days": 30
@@ -72,7 +65,6 @@ class Database:
     async def init_db(self):
         """Инициализация таблиц в базе данных"""
         async with aiosqlite.connect(self.db_path) as db:
-            # Пользователи
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
@@ -88,18 +80,15 @@ class Database:
                 )
             ''')
             
-            # Подключенные каналы
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS channels (
                     channel_id TEXT PRIMARY KEY,
                     channel_name TEXT,
                     user_id INTEGER,
-                    added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (user_id) REFERENCES users (user_id)
+                    added_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             
-            # Запланированные публикации
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS scheduled_posts (
                     post_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,13 +99,10 @@ class Database:
                     media_path TEXT,
                     scheduled_time DATETIME,
                     status TEXT DEFAULT 'pending',
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (user_id) REFERENCES users (user_id),
-                    FOREIGN KEY (channel_id) REFERENCES channels (channel_id)
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             
-            # Платежи и тарифы
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS payments (
                     payment_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,12 +110,10 @@ class Database:
                     tariff TEXT,
                     amount INTEGER,
                     status TEXT,
-                    payment_date DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (user_id) REFERENCES users (user_id)
+                    payment_date DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             
-            # Настройки тарифов
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS tariff_prices (
                     tariff_name TEXT PRIMARY KEY,
@@ -138,7 +122,6 @@ class Database:
                 )
             ''')
             
-            # Приватные каналы для тарифов
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS private_channels (
                     tariff_name TEXT PRIMARY KEY,
@@ -150,7 +133,6 @@ class Database:
             
             await db.commit()
             
-            # Добавляем цены тарифов по умолчанию
             for tariff_name, tariff_data in TARIFFS.items():
                 await db.execute('''
                     INSERT OR IGNORE INTO tariff_prices (tariff_name, price)
@@ -190,13 +172,11 @@ class Database:
     async def add_channel(self, user_id: int, channel_id: str, channel_name: str):
         """Добавление канала пользователя"""
         async with aiosqlite.connect(self.db_path) as db:
-            # Проверяем лимит каналов
             user = await self.get_user(user_id)
             if user:
                 tariff = user['tariff']
                 channels_limit = TARIFFS.get(tariff, {}).get('channels_limit', 1)
                 
-                # Получаем текущее количество каналов
                 cursor = await db.execute(
                     'SELECT COUNT(*) FROM channels WHERE user_id = ?', 
                     (user_id,)
@@ -260,23 +240,19 @@ class Database:
     async def get_statistics(self) -> Dict:
         """Получение статистики"""
         async with aiosqlite.connect(self.db_path) as db:
-            # Общее количество пользователей
             cursor = await db.execute('SELECT COUNT(*) FROM users')
             total_users = (await cursor.fetchone())[0]
             
-            # Пользователи по тарифам
             cursor = await db.execute('''
                 SELECT tariff, COUNT(*) as count FROM users GROUP BY tariff
             ''')
             tariff_stats = await cursor.fetchall()
             
-            # Общая прибыль
             cursor = await db.execute('''
                 SELECT SUM(amount) FROM payments WHERE status = 'completed'
             ''')
             total_revenue = (await cursor.fetchone())[0] or 0
             
-            # Запланированные публикации
             cursor = await db.execute('''
                 SELECT COUNT(*) FROM scheduled_posts WHERE status = 'pending'
             ''')
@@ -343,20 +319,83 @@ class Database:
             ''', (user_id, tariff, amount, status))
             await db.commit()
 
-# Инициализация базы данных
-db = Database(DATABASE_PATH)
-
 # ========== ТЕЛЕГРАМ БОТ ==========
 class SchedulerBot:
     def __init__(self):
         self.application = None
         self.scheduler = AsyncIOScheduler()
         self.user_states = {}
+        self.db = Database(DATABASE_PATH)
         
+    async def setup(self):
+        """Настройка бота"""
+        # Инициализация базы данных
+        await self.db.init_db()
+        
+        # Создание приложения
+        self.application = Application.builder().token(BOT_TOKEN).build()
+        
+        # Настройка обработчиков
+        self.setup_handlers()
+        
+        # Инициализация приложения
+        await self.application.initialize()
+        await self.application.start()
+        
+        # Запуск планировщика
+        self.scheduler.start()
+        
+        # Запуск проверки подписок
+        asyncio.create_task(self.check_subscriptions())
+        
+        logger.info("Bot setup completed")
+        
+    def setup_handlers(self):
+        """Настройка обработчиков"""
+        # Команда /start
+        self.application.add_handler(CommandHandler("start", self.start))
+        
+        # Обработчики callback
+        self.application.add_handler(CallbackQueryHandler(
+            self.handle_callback, 
+            pattern="^(schedule_post|my_channels|tariffs|help|admin_panel|back_to_menu|add_channel)$"
+        ))
+        
+        self.application.add_handler(CallbackQueryHandler(
+            self.handle_schedule_callback,
+            pattern="^schedule_"
+        ))
+        
+        self.application.add_handler(CallbackQueryHandler(
+            self.handle_tariff_callback,
+            pattern="^tariff_"
+        ))
+        
+        self.application.add_handler(CallbackQueryHandler(
+            self.handle_admin_callback,
+            pattern="^admin_"
+        ))
+        
+        self.application.add_handler(CallbackQueryHandler(
+            self.handle_channel_selection,
+            pattern="^select_channel_"
+        ))
+        
+        # Обработчики сообщений
+        self.application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND, 
+            self.handle_message
+        ))
+        
+        self.application.add_handler(MessageHandler(
+            filters.PHOTO | filters.VIDEO,
+            self.handle_message
+        ))
+    
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка команды /start"""
         user = update.effective_user
-        await db.add_user(user.id, user.username, user.first_name, user.last_name)
+        await self.db.add_user(user.id, user.username, user.first_name, user.last_name)
         
         keyboard = [
             [InlineKeyboardButton("📅 Запланировать пост", callback_data="schedule_post")],
@@ -395,12 +434,6 @@ class SchedulerBot:
             await self.show_help(query)
         elif data == "admin_panel":
             await self.show_admin_panel(query)
-        elif data.startswith("schedule_"):
-            await self.handle_schedule_callback(query, data)
-        elif data.startswith("tariff_"):
-            await self.handle_tariff_callback(query, data)
-        elif data.startswith("admin_"):
-            await self.handle_admin_callback(query, data)
         elif data == "add_channel":
             await query.edit_message_text(
                 "Отправьте мне ссылку на ваш канал в формате:\n"
@@ -488,8 +521,7 @@ class SchedulerBot:
         user_id = update.effective_user.id
         message = update.message
         
-        # Получаем каналы пользователя
-        channels = await db.get_user_channels(user_id)
+        channels = await self.db.get_user_channels(user_id)
         if not channels:
             await message.reply_text(
                 "У вас нет добавленных каналов.\n"
@@ -498,7 +530,6 @@ class SchedulerBot:
             del self.user_states[user_id]
             return
         
-        # Создаем клавиатуру с каналами
         keyboard = []
         for channel in channels:
             keyboard.append([
@@ -511,7 +542,6 @@ class SchedulerBot:
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        # Сохраняем контент в контексте
         context.user_data["post_content"] = {
             "text": message.caption or message.text,
             "media": None,
@@ -543,7 +573,15 @@ class SchedulerBot:
                 return
             
             user_id = update.effective_user.id
-            await self.request_post_content_from_message(update, schedule_time)
+            self.user_states[user_id] = {
+                "action": "awaiting_content",
+                "schedule_time": schedule_time
+            }
+            
+            await update.message.reply_text(
+                f"⏰ Запланировано на: {schedule_time.strftime('%Y.%m.%d %H:%M')}\n\n"
+                "Отправьте мне контент для публикации..."
+            )
             
         except ValueError:
             await update.message.reply_text(
@@ -551,19 +589,6 @@ class SchedulerBot:
                 "Используйте: ГГГГ.ММ.ДД ЧЧ:ММ\n"
                 "Пример: 2025.12.31 15:30"
             )
-    
-    async def request_post_content_from_message(self, update: Update, schedule_time: datetime):
-        """Запрос контента после ввода времени"""
-        user_id = update.effective_user.id
-        self.user_states[user_id] = {
-            "action": "awaiting_content",
-            "schedule_time": schedule_time
-        }
-        
-        await update.message.reply_text(
-            f"⏰ Запланировано на: {schedule_time.strftime('%Y.%m.%d %H:%M')}\n\n"
-            "Отправьте мне контент для публикации..."
-        )
     
     async def process_channel_addition(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка добавления канала"""
@@ -573,15 +598,14 @@ class SchedulerBot:
             channel_id = str(message.forward_from_chat.id)
             channel_name = message.forward_from_chat.title
             
-            success, msg = await db.add_channel(update.effective_user.id, channel_id, channel_name)
+            success, msg = await self.db.add_channel(update.effective_user.id, channel_id, channel_name)
             await message.reply_text(msg)
         
         elif message.text and message.text.startswith("https://t.me/"):
-            # Извлекаем username из ссылки
             channel_username = message.text.split("/")[-1].replace("@", "")
             channel_id = f"@{channel_username}"
             
-            success, msg = await db.add_channel(update.effective_user.id, channel_id, channel_username)
+            success, msg = await self.db.add_channel(update.effective_user.id, channel_id, channel_username)
             await message.reply_text(msg)
         else:
             await message.reply_text(
@@ -603,7 +627,6 @@ class SchedulerBot:
         channel_id = query.data.replace("select_channel_", "")
         user_id = query.from_user.id
         
-        # Получаем сохраненный контент
         post_content = context.user_data.get("post_content")
         schedule_time = context.user_data.get("schedule_time")
         
@@ -611,8 +634,7 @@ class SchedulerBot:
             await query.edit_message_text("Ошибка: данные не найдены")
             return
         
-        # Сохраняем в базу данных
-        post_id = await db.add_scheduled_post(
+        post_id = await self.db.add_scheduled_post(
             user_id=user_id,
             channel_id=channel_id,
             content_type=post_content["content_type"],
@@ -621,7 +643,6 @@ class SchedulerBot:
             scheduled_time=schedule_time
         )
         
-        # Планируем публикацию
         await self.schedule_post(post_id, channel_id, post_content, schedule_time)
         
         await query.edit_message_text(
@@ -631,7 +652,6 @@ class SchedulerBot:
             f"📝 ID публикации: {post_id}"
         )
         
-        # Очищаем данные
         if "post_content" in context.user_data:
             del context.user_data["post_content"]
         if "schedule_time" in context.user_data:
@@ -665,24 +685,24 @@ class SchedulerBot:
                         parse_mode=ParseMode.HTML
                     )
                 
-                await db.update_post_status(post_id, "published")
+                await self.db.update_post_status(post_id, "published")
                 logger.info(f"Post {post_id} published to {channel_id}")
                 
             except Exception as e:
                 logger.error(f"Failed to publish post {post_id}: {e}")
-                await db.update_post_status(post_id, "failed")
+                await self.db.update_post_status(post_id, "failed")
         
-        # Добавляем задачу в планировщик
         self.scheduler.add_job(
             publish_post,
-            DateTrigger(run_date=schedule_time),
+            'date',
+            run_date=schedule_time,
             id=f"post_{post_id}"
         )
     
     async def show_user_channels(self, query):
         """Показать каналы пользователя"""
         user_id = query.from_user.id
-        channels = await db.get_user_channels(user_id)
+        channels = await self.db.get_user_channels(user_id)
         
         if not channels:
             text = "📭 У вас нет добавленных каналов"
@@ -703,8 +723,8 @@ class SchedulerBot:
     async def show_tariffs(self, query):
         """Показать тарифы"""
         user_id = query.from_user.id
-        user = await db.get_user(user_id)
-        tariff_prices = await db.get_tariff_prices()
+        user = await self.db.get_user(user_id)
+        tariff_prices = await self.db.get_tariff_prices()
         
         text = "💎 Доступные тарифы:\n\n"
         
@@ -743,18 +763,15 @@ class SchedulerBot:
             return
         
         user_id = query.from_user.id
-        tariff_prices = await db.get_tariff_prices()
+        tariff_prices = await self.db.get_tariff_prices()
         price = tariff_prices.get(tariff_name, TARIFFS[tariff_name]['price'])
         
-        # Получаем приватный канал для тарифа
-        private_channel = await db.get_private_channel(tariff_name)
+        private_channel = await self.db.get_private_channel(tariff_name)
         
         if private_channel:
-            # Обновляем тариф пользователя
-            await db.update_user_tariff(user_id, tariff_name)
-            await db.add_payment(user_id, tariff_name, price)
+            await self.db.update_user_tariff(user_id, tariff_name)
+            await self.db.add_payment(user_id, tariff_name, price)
             
-            # Отправляем ссылку на приватный канал
             await query.edit_message_text(
                 f"✅ Тариф успешно активирован!\n\n"
                 f"💎 Тариф: {TARIFFS[tariff_name]['name']}\n"
@@ -765,7 +782,6 @@ class SchedulerBot:
                 f"если вы не войдете самостоятельно."
             )
             
-            # Планируем удаление пользователя из канала через 2 часа
             await self.schedule_channel_kick(user_id, private_channel['channel_id'])
             
         else:
@@ -786,11 +802,11 @@ class SchedulerBot:
             except Exception as e:
                 logger.error(f"Failed to kick user {user_id}: {e}")
         
-        # Удаление через 2 часа
         kick_time = datetime.now() + timedelta(hours=2)
         self.scheduler.add_job(
             kick_user,
-            DateTrigger(run_date=kick_time),
+            'date',
+            run_date=kick_time,
             id=f"kick_{user_id}_{channel_id}"
         )
     
@@ -800,7 +816,7 @@ class SchedulerBot:
             await query.edit_message_text("Доступ запрещен")
             return
         
-        stats = await db.get_statistics()
+        stats = await self.db.get_statistics()
         
         text = f"""
 👑 <b>Админ панель</b>
@@ -841,14 +857,11 @@ class SchedulerBot:
             await self.show_price_management(query)
         elif data == "admin_channels":
             await self.show_channel_management(query)
-        elif data.startswith("set_price_"):
-            tariff_name = data.replace("set_price_", "")
-            await self.request_new_price(query, tariff_name)
     
     async def show_full_stats(self, query):
         """Показать полную статистику"""
-        stats = await db.get_statistics()
-        users = await db.get_all_users()
+        stats = await self.db.get_statistics()
+        users = await self.db.get_all_users()
         
         text = f"""
 📈 <b>Полная статистика</b>
@@ -876,13 +889,12 @@ class SchedulerBot:
     
     async def export_users(self, query):
         """Экспорт пользователей"""
-        users = await db.get_all_users()
+        users = await self.db.get_all_users()
         
         if not users:
             await query.edit_message_text("Нет пользователей для экспорта")
             return
         
-        # Формируем текст для экспорта
         export_text = "ID,Username,First Name,Last Name,Tariff,Registered\n"
         for user in users:
             export_text += f"{user['user_id']},"
@@ -892,7 +904,6 @@ class SchedulerBot:
             export_text += f"{user['tariff']},"
             export_text += f"{user['registered_at']}\n"
         
-        # Отправляем как файл
         await query.edit_message_text("Файл с пользователями готов!")
         await query.message.reply_document(
             document=export_text.encode('utf-8'),
@@ -900,71 +911,23 @@ class SchedulerBot:
             caption="📋 Экспорт пользователей"
         )
         
-        # Возвращаемся в админку
         keyboard = [[InlineKeyboardButton("◀️ Назад в админку", callback_data="admin_panel")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.message.reply_text("Выберите действие:", reply_markup=reply_markup)
     
     async def show_price_management(self, query):
         """Управление ценами тарифов"""
-        tariff_prices = await db.get_tariff_prices()
-        
-        text = "💰 <b>Управление ценами тарифов</b>\n\n"
-        
-        keyboard = []
-        for tariff_name, tariff_data in TARIFFS.items():
-            price = tariff_prices.get(tariff_name, tariff_data['price'])
-            text += f"<b>{tariff_data['name']}</b>: {price} звезд\n"
-            
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"Изменить {tariff_data['name']}",
-                    callback_data=f"set_price_{tariff_name}"
-                )
-            ])
-        
-        keyboard.append([InlineKeyboardButton("◀️ Назад в админку", callback_data="admin_panel")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
-    
-    async def request_new_price(self, query, tariff_name: str):
-        """Запрос новой цены для тарифа"""
         await query.edit_message_text(
-            f"Введите новую цену для тарифа '{TARIFFS[tariff_name]['name']}' (в звездах):\n\n"
-            f"Пример: 350"
+            "Функция изменения цен временно недоступна.\n"
+            "Для изменения цен отредактируйте переменную TARIFFS в коде."
         )
-        
-        # Сохраняем состояние
-        self.user_states[query.from_user.id] = {
-            "action": "admin_set_price",
-            "tariff_name": tariff_name
-        }
     
     async def show_channel_management(self, query):
         """Управление приватными каналами"""
-        text = "🔗 <b>Управление приватными каналами</b>\n\n"
-        
-        keyboard = []
-        for tariff_name, tariff_data in TARIFFS.items():
-            channel = await db.get_private_channel(tariff_name)
-            status = "✅ Настроен" if channel else "❌ Не настроен"
-            
-            text += f"<b>{tariff_data['name']}</b>: {status}\n"
-            if channel:
-                text += f"Канал: {channel['channel_id']}\n"
-            
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"{'Изменить' if channel else 'Добавить'} {tariff_data['name']}",
-                    callback_data=f"admin_add_channel_{tariff_name}"
-                )
-            ])
-        
-        keyboard.append([InlineKeyboardButton("◀️ Назад в админку", callback_data="admin_panel")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        await query.edit_message_text(
+            "Функция управления каналами временно недоступна.\n"
+            "Для настройки приватных каналов обратитесь к разработчику."
+        )
     
     async def show_help(self, query):
         """Показать справку"""
@@ -976,22 +939,10 @@ class SchedulerBot:
 2. <b>Мои каналы</b> - управление подключенными каналами
 3. <b>Тарифы</b> - покупка подписки на расширенные возможности
 
-<b>Как добавить канал:</b>
-1. Перешлите любое сообщение из канала боту
-2. Или отправьте ссылку на канал
-
 <b>Формат времени:</b>
 При выборе своего времени используйте формат:
 <b>ГГГГ.ММ.ДД ЧЧ:ММ</b>
 Пример: <code>2025.12.31 15:30</code>
-
-<b>Тарифы:</b>
-• Базовый - 2 канала, 5 постов/день
-• Премиум - 5 каналов, 20 постов/день  
-• VIP - 10 каналов, 50 постов/день
-
-<b>Поддержка:</b>
-По вопросам работы бота обращайтесь к администратору.
 """
         
         keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]]
@@ -1017,67 +968,6 @@ class SchedulerBot:
             "Главное меню. Выберите действие:",
             reply_markup=reply_markup
         )
-    
-    async def handle_admin_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка админ сообщений"""
-        user_id = update.effective_user.id
-        message = update.message
-        
-        if user_id != ADMIN_ID:
-            return
-        
-        if user_id in self.user_states:
-            state = self.user_states[user_id]
-            
-            if state["action"] == "admin_set_price":
-                try:
-                    new_price = int(message.text)
-                    if new_price <= 0:
-                        raise ValueError
-                    
-                    tariff_name = state["tariff_name"]
-                    await db.update_tariff_price(tariff_name, new_price)
-                    
-                    await message.reply_text(
-                        f"✅ Цена тарифа '{TARIFFS[tariff_name]['name']}' "
-                        f"изменена на {new_price} звезд"
-                    )
-                    
-                    del self.user_states[user_id]
-                    
-                except ValueError:
-                    await message.reply_text("Неверная цена! Введите целое число больше 0.")
-            
-            elif state["action"] == "admin_add_channel":
-                # Обработка добавления канала админом
-                tariff_name = state.get("tariff_name")
-                
-                if message.forward_from_chat:
-                    channel_id = str(message.forward_from_chat.id)
-                    
-                    try:
-                        # Создаем ссылку-приглашение
-                        chat = await context.bot.get_chat(channel_id)
-                        invite_link = await chat.create_invite_link(
-                            member_limit=1,
-                            expire_date=timedelta(hours=24)
-                        )
-                        
-                        await db.add_private_channel(
-                            tariff_name, 
-                            channel_id, 
-                            invite_link.invite_link
-                        )
-                        
-                        await message.reply_text(
-                            f"✅ Приватный канал для тарифа '{TARIFFS[tariff_name]['name']}' добавлен!\n\n"
-                            f"Ссылка: {invite_link.invite_link}"
-                        )
-                        
-                    except Exception as e:
-                        await message.reply_text(f"Ошибка: {e}")
-                
-                del self.user_states[user_id]
     
     async def check_subscriptions(self):
         """Проверка и обновление подписок"""
@@ -1111,93 +1001,71 @@ class SchedulerBot:
             except Exception as e:
                 logger.error(f"Error checking subscriptions: {e}")
             
-            await asyncio.sleep(3600)  # Проверка каждый час
-    
-    def setup_handlers(self):
-        """Настройка обработчиков"""
-        # Команда /start
-        self.application.add_handler(CommandHandler("start", self.start))
-        
-        # Обработчики callback
-        self.application.add_handler(CallbackQueryHandler(
-            self.handle_callback, 
-            pattern="^(schedule_post|my_channels|tariffs|help|admin_panel|back_to_menu|add_channel)$"
-        ))
-        
-        self.application.add_handler(CallbackQueryHandler(
-            self.handle_schedule_callback,
-            pattern="^schedule_"
-        ))
-        
-        self.application.add_handler(CallbackQueryHandler(
-            self.handle_tariff_callback,
-            pattern="^tariff_"
-        ))
-        
-        self.application.add_handler(CallbackQueryHandler(
-            self.handle_admin_callback,
-            pattern="^admin_"
-        ))
-        
-        self.application.add_handler(CallbackQueryHandler(
-            self.handle_channel_selection,
-            pattern="^select_channel_"
-        ))
-        
-        self.application.add_handler(CallbackQueryHandler(
-            self.request_new_price,
-            pattern="^set_price_"
-        ))
-        
-        # Обработчики сообщений
-        self.application.add_handler(MessageHandler(
-            filters.TEXT & ~filters.COMMAND, 
-            self.handle_message
-        ))
-        
-        self.application.add_handler(MessageHandler(
-            filters.PHOTO | filters.VIDEO,
-            self.handle_message
-        ))
-        
-        # Админ обработчики
-        self.application.add_handler(MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            self.handle_admin_message
-        ))
-    
-    async def run(self):
-        """Запуск бота"""
-        # Инициализация базы данных
-        await db.init_db()
-        
-        # Создание приложения
-        self.application = Application.builder().token(BOT_TOKEN).build()
-        
-        # Настройка обработчиков
-        self.setup_handlers()
-        
-        # Запуск планировщика
-        self.scheduler.start()
-        
-        # Запуск проверки подписок
-        asyncio.create_task(self.check_subscriptions())
-        
-        # Запуск бота
-        await self.application.initialize()
-        await self.application.start()
-        await self.application.updater.start_polling()
-        
-        logger.info("Bot started successfully!")
-        
-        # Бесконечный цикл
-        await asyncio.Future()
+            await asyncio.sleep(3600)
 
-# ========== ЗАПУСК БОТА ==========
-if __name__ == "__main__":
-    bot = SchedulerBot()
-    
+# ========== ВЕБ-СЕРВЕР ДЛЯ WEBHOOK ==========
+bot_instance = SchedulerBot()
+
+async def handle_webhook(request):
+    """Обработчик webhook"""
     try:
-        asyncio.run(bot.run())
+        data = await request.json()
+        update = Update.de_json(data, bot_instance.application.bot)
+        await bot_instance.application.process_update(update)
+        return web.Response()
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return web.Response(status=500)
+
+async def health_check(request):
+    """Проверка здоровья"""
+    return web.Response(text="Bot is running!")
+
+async def setup_webhook():
+    """Настройка webhook"""
+    domain = os.getenv('RAILWAY_PUBLIC_DOMAIN')
+    
+    if domain:
+        webhook_url = f"https://{domain}/webhook"
+        try:
+            await bot_instance.application.bot.set_webhook(
+                url=webhook_url,
+                drop_pending_updates=True
+            )
+            logger.info(f"Webhook set to: {webhook_url}")
+        except Exception as e:
+            logger.error(f"Failed to set webhook: {e}")
+    else:
+        logger.info("Running in polling mode (local development)")
+
+async def main():
+    """Основная функция запуска"""
+    # Инициализируем бота
+    await bot_instance.setup()
+    
+    # Настраиваем webhook если на Railway
+    await setup_webhook()
+    
+    # Создаем веб-сервер для обработки webhook
+    app = web.Application()
+    app.router.add_post('/webhook', handle_webhook)
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    
+    # Запускаем сервер
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    
+    logger.info(f"Server started on port {PORT}")
+    
+    # Бесконечный цикл
+    while True:
+        await asyncio.sleep(3600)
+
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped")
